@@ -4,8 +4,10 @@ import cv2
 import socket
 import struct
 import time
-import logging
+from logger import Logger
 from typing import Optional, Tuple
+from network_impairment import NetworkImpairment
+from data_collection import DataCollection
 
 class VideoCaptureServer:
     def __init__(
@@ -18,7 +20,9 @@ class VideoCaptureServer:
         fps: int = 30,
         max_connections: int = 1,
         repeat: bool = True,
-        enable_logging: bool = True
+        enable_logging: bool = True,
+        enable_impairment: bool = True,
+        enable_collection: bool = True
     ):
         """
         Initialize the video streaming server.
@@ -41,21 +45,38 @@ class VideoCaptureServer:
         self.fps = fps          # ML might change this
         self.max_connections = max_connections
         self.repeat = repeat
+        if enable_impairment:
+            self.network_impairment = NetworkImpairment(
+                enable_logging= enable_logging
+            )
+        if enable_collection:
+            self.data_collection = DataCollection(
+                enable_logging= enable_logging
+            )
         # State
         self.is_running = False
         self.connection_count = 0
         self.frame_count = 0
         self.start_time = None
         self.is_video_file = False
+        self.bytes_sent = 0
         # Setup logging
-        self.logger = self._setup_logging(enable_logging)
-        
+        self.logger = Logger.get_logger(__name__, enable_logging=True)
+        self.logger.debug("DEBUG: Server logger initialized")
+        self.client_socket = None
+        self.client_address = None
+
         # Initialize components
         try:
             self.video_capture = self._init_video(camera_index)
             self.server_socket = self._init_server()
-            self.client_socket = None
-            self.client_address = None
+            
+            self.network_impairment = NetworkImpairment(
+                loss_rate = 0.5,
+                delay_ms = 100.0,
+                jitter_ms = 100.0,
+                enable_logging=enable_logging) if enable_impairment else None
+            self.data_collection = DataCollection(enable_logging=enable_logging) if enable_collection else None
             
             self.logger.info(f"Server initialized on {host}:{port}")
             self.logger.info(f"Initial quality: {quality}, scale: {scale}, fps: {fps}")
@@ -63,21 +84,6 @@ class VideoCaptureServer:
         except Exception as e:
             self.logger.error(f"Initialization failed: {e}")
             raise
-    
-    def _setup_logging(self, enable: bool) -> logging.Logger:
-        """Setup logging configuration."""
-        logger = logging.getLogger('VideoCaptureServer')
-        if enable:
-            logger.setLevel(logging.DEBUG)
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        else:
-            logger.setLevel(logging.WARNING)
-        return logger
     
     def _init_video(self, camera_index: int) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(camera_index)
@@ -185,14 +191,22 @@ class VideoCaptureServer:
         """
         try:
             # Encode with JPEG compression
+            encode_start = time.perf_counter()
             encode_param = [cv2.IMWRITE_JPEG_QUALITY, self.quality]
             ret, jpeg = cv2.imencode('.jpg', frame, encode_param)
-            
             if not ret:
                 self.logger.warning("Failed to encode frame")
                 return None
-            
-            return jpeg.tobytes()
+            data = jpeg.tobytes()
+            encode_time = (time.perf_counter() - encode_start) * 1000
+
+            # Record encoding data if collection enabled
+            if self.data_collection:
+                # We'll record later when sending to include send_time and impairment
+                # For now we store encode time in a temporary attribute or pass along.
+                self._last_encode_time = encode_time
+                self._last_frame_data = data
+            return data
             
         except Exception as e:
             self.logger.error(f"Encoding failed: {e}")
@@ -206,10 +220,64 @@ class VideoCaptureServer:
             bool: True if sent successfully
         """
         try:
-            # Send frame size (4 bytes) then frame data
-            # Force fixed Unsigned Int
+            # Apply impairment
+            dropped = False
+            delayed = False
+            if self.network_impairment:
+                if not self.network_impairment.apply_impairment():
+                    dropped = True
+                    # Record dropped frame
+                    if self.data_collection:
+                        self.data_collection.record_frame(
+                            frame_id=self.frame_count,
+                            loss_rate=self.network_impairment.loss_rate,
+                            delay_ms=self.network_impairment.delay_ms,
+                            jitter_ms=self.network_impairment.jitter_ms,
+                            quality=self.quality,
+                            scale=self.scale,
+                            fps=self.fps,
+                            frame_size=0,
+                            encode_time=self._last_encode_time if hasattr(self, '_last_encode_time') else 0,
+                            send_time=0,
+                            was_dropped=dropped,
+                            was_delayed=delayed,
+                            cumulative_frames=self.frame_count,
+                            cumulative_bytes=self.bytes_sent,
+                            cumulative_dropped=self.network_impairment.dropped_frames,
+                            cumulative_delayed=self.network_impairment.delayed_frames
+                        )
+                    return True  # Continue loop
+
+            # Send frame
+            start_time = time.perf_counter()
             message_size = struct.pack("!I", len(data))
             self.client_socket.sendall(message_size + data)
+            send_time = (time.perf_counter() - start_time) * 1000
+
+            self.frame_count += 1
+            self.bytes_sent += len(data)
+
+            # Record successful frame
+            if self.data_collection:
+                self.data_collection.record_frame(
+                    frame_id=self.frame_count,
+                    loss_rate=self.network_impairment.loss_rate if self.network_impairment else 0,
+                    delay_ms=self.network_impairment.delay_ms if self.network_impairment else 0,
+                    jitter_ms=self.network_impairment.jitter_ms if self.network_impairment else 0,
+                    quality=self.quality,
+                    scale=self.scale,
+                    fps=self.fps,
+                    frame_size=len(data),
+                    encode_time=self._last_encode_time if hasattr(self, '_last_encode_time') else 0,
+                    send_time=send_time,
+                    was_dropped=dropped,
+                    was_delayed=delayed,
+                    cumulative_frames=self.frame_count,
+                    cumulative_bytes=self.bytes_sent,
+                    cumulative_dropped=self.network_impairment.dropped_frames,
+                    cumulative_delayed=self.network_impairment.delayed_frames
+                )
+
             return True
             
         except socket.error as e:
@@ -257,30 +325,6 @@ class VideoCaptureServer:
             self.logger.info(f"FPS updated to {fps}")
         else:
             self.logger.warning(f"Invalid FPS: {fps} (must be 1-60)")
-    
-    def get_stats(self) -> dict:
-        """
-        Get server statistics.
-        
-        Returns:
-            Dictionary with current statistics
-        """
-        if self.start_time is None:
-            runtime = 0
-        else:
-            runtime = time.time() - self.start_time
-        
-        return {
-            'frames_sent': self.frame_count,
-            'runtime': runtime,
-            'fps_actual': self.frame_count / runtime if runtime > 0 else 0,
-            'fps_target': self.fps,
-            'quality': self.quality,
-            'scale': self.scale,
-            'connections': self.connection_count,
-            'is_running': self.is_running,
-            'client_connected': self.client_socket is not None
-        }
     
     def stream(self, max_frames: int = None, show_preview: bool = False):
         """

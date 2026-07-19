@@ -5,7 +5,7 @@ import cv2
 import socket
 import struct
 import numpy as np
-import logging
+from logger import Logger
 from typing import List, Optional
 import threading
 import time
@@ -37,7 +37,7 @@ class VideoCaptureClient:
         self.frame_available = threading.Event()
         self.web_port = web_port
         # Setup logging
-        self.logger = self._setup_logging(enable_logging)
+        self.logger = Logger.get_logger(__name__, enable_logging=enable_logging)
         # 
         self.app = Flask(__name__)
         self._setup_routes()
@@ -90,22 +90,7 @@ class VideoCaptureClient:
                    b'Content-Type: image/jpeg\r\n'
                    b'Content-Length: ' + str(len(frame_data)).encode() + b'\r\n\r\n'
                    + frame_data + b'\r\n')
-
-    def _setup_logging(self, enable: bool) -> logging.Logger:
-        """Setup logging configuration."""
-        logger = logging.getLogger('VideoCaptureClient')
-        if enable:
-            logger.setLevel(logging.DEBUG)
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        else:
-            logger.setLevel(logging.WARNING)
-        return logger
-    
+            
     def _init_client(self) -> socket.socket:
         """Connect to the server."""
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
