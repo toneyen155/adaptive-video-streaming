@@ -13,11 +13,11 @@ class DataCollection:
     ):
         self.experiment_id = experiment_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         try:
-            os.mkdir(dir)
+            os.mkdir(self.dir)
             print(f"Directory '{self.dir}' created successfully.")
         except Exception as e:
             print(f"An error occurred: {e}")
-        self.output_file = output_file or f"{self.dir}/data_{self.experiment_id}.csv"
+        self.output_file = f"{self.dir}/{output_file or self.experiment_id}.csv"
         self.logger = Logger.get_logger(__name__, enable_logging)
         self.buffer = []  # temporary buffer for batching
         self._init_csv()
@@ -42,9 +42,12 @@ class DataCollection:
             'cumulative_dropped',
             'cumulative_delayed'
         ]
-        with open(self.output_file, 'w', newline='') as f:
+        file_exists = os.path.isfile(self.output_file)
+        mode = 'a' if file_exists else 'w'
+        with open(self.output_file, mode=mode, newline='') as f:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
-            writer.writeheader()
+            if not file_exists:
+                writer.writeheader()
         self.logger.info(f"Data collection initialized: {self.output_file}")
 
     def record_frame(self, **kwargs):

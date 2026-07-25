@@ -8,6 +8,12 @@ from logger import Logger
 from typing import Optional, Tuple
 from network_impairment import NetworkImpairment
 from data_collection import DataCollection
+from dotenv import load_dotenv
+import os
+
+load_dotenv() 
+SERVER_IP= os.getenv("SERVER_IP") 
+SERVER_PORT= os.getenv("SERVER_PORT") 
 
 class VideoCaptureServer:
     def __init__(
@@ -22,7 +28,8 @@ class VideoCaptureServer:
         repeat: bool = True,
         enable_logging: bool = True,
         enable_impairment: bool = True,
-        enable_collection: bool = True
+        enable_collection: bool = True,
+        output_file : str = None,
     ):
         """
         Initialize the video streaming server.
@@ -36,10 +43,13 @@ class VideoCaptureServer:
             fps: Target frames per second
             max_connections: Maximum client connections
             enable_logging: Enable debug logging
+            repeat: Loop video
+            enable_impairment: Enable network impairment
+            enable_collection: Enable data collection
         """
         # Configuration
         self.host = host
-        self.port = port
+        self.port = int(port)
         self.quality = quality  # ML will change this
         self.scale = scale      # ML will change this
         self.fps = fps          # ML might change this
@@ -51,6 +61,7 @@ class VideoCaptureServer:
             )
         if enable_collection:
             self.data_collection = DataCollection(
+                output_file=output_file,
                 enable_logging= enable_logging
             )
         # State
@@ -76,7 +87,7 @@ class VideoCaptureServer:
                 delay_ms = 100.0,
                 jitter_ms = 100.0,
                 enable_logging=enable_logging) if enable_impairment else None
-            self.data_collection = DataCollection(enable_logging=enable_logging) if enable_collection else None
+            self.data_collection = DataCollection(enable_logging=enable_logging, output_file=output_file) if enable_collection else None
             
             self.logger.info(f"Server initialized on {host}:{port}")
             self.logger.info(f"Initial quality: {quality}, scale: {scale}, fps: {fps}")
@@ -432,12 +443,16 @@ class VideoCaptureServer:
         """Context manager exit."""
         self.stop()
 
+    def get_stats(self):
+        return self.network_impairment.get_stats()
 
-# Usage Example:
+
 def main():
     # Create and start server
     with VideoCaptureServer(
         camera_index=0,
+        host=SERVER_IP,
+        port=SERVER_PORT,
         quality=80,
         scale=0.5,
         fps=30,

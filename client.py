@@ -9,6 +9,14 @@ from logger import Logger
 from typing import List, Optional
 import threading
 import time
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+CLIENT_IP= os.getenv("CLIENT_IP") 
+SERVER_IP= os.getenv("SERVER_IP") 
+CLIENT_PORT= os.getenv("CLIENT_PORT") 
+SERVER_PORT= os.getenv("SERVER_PORT") 
 
 class VideoCaptureClient:
     def __init__(
@@ -27,27 +35,22 @@ class VideoCaptureClient:
             enable_logging: Enable debug logging
         """
         self.host = host
-        self.port = port
+        self.port = int(port)
         self.client_socket = None
-        self.is_running = False
+        self.is_running = True
         self.frame_count = 0
         self.frames: List[bytes] = []  # Store encoded JPEG bytes
         self.frame_lock = threading.Lock()  # Mutex for thread-safe access
         self.latest_frame = None
         self.frame_available = threading.Event()
-        self.web_port = web_port
+        self.web_port = int(web_port)
+        self.connected = False
         # Setup logging
         self.logger = Logger.get_logger(__name__, enable_logging=enable_logging)
         # 
         self.app = Flask(__name__)
         self._setup_routes()
-        # Connect to server
-        try:
-            self.client_socket = self._init_client()
-            self.logger.info(f"Connected to server {host}:{port}")
-        except Exception as e:
-            self.logger.error(f"Connection failed: {e}")
-            raise
+        
         # Start receiver thread
         self.receiver_thread = threading.Thread(target=self.stream, daemon=True)
         self.receiver_thread.start()
@@ -57,7 +60,7 @@ class VideoCaptureClient:
         @self.app.route("/")
         def entrypoint():
             self.logger.debug("Requested /")
-            return render_template("index.html", host=self.host, port =self.port, frame_count=self.frame_count)
+            return render_template("index.html", host=self.host, port=self.port, frame_count=self.frame_count)
         
         @self.app.route("/video_feed")
         def video_feed():
@@ -90,14 +93,40 @@ class VideoCaptureClient:
                    b'Content-Type: image/jpeg\r\n'
                    b'Content-Length: ' + str(len(frame_data)).encode() + b'\r\n\r\n'
                    + frame_data + b'\r\n')
-            
-    def _init_client(self) -> socket.socket:
-        """Connect to the server."""
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.settimeout(10.0)  # 10 second timeout for connection
-        client.connect((self.host, self.port))
-        client.settimeout(None)  # No timeout for receiving (or set a reasonable one)
-        return client
+
+    def _connect(self) -> bool:
+        """Establish a connection to the server with a single attempt."""
+        if self.client_socket:
+            try:
+                self.client_socket.close()
+            except:
+                pass
+            self.client_socket = None
+
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.settimeout(10.0)   # Connection timeout
+            self.client_socket.connect((self.host, self.port))
+            self.client_socket.settimeout(None)   # No timeout for receiving
+            self.logger.info(f"Connected to server {self.host}:{self.port}")
+            self.connected = True
+            return True
+        except Exception as e:
+            self.logger.warning(f"Connection attempt failed: {e}")
+            self.connected = False
+            return False
+
+    def _reconnect(self) -> bool:
+        """Try to reconnect with exponential backoff until success or stopped."""
+        self.logger.info("Attempting to reconnect...")
+        delay = 1
+        while self.is_running:
+            if self._connect():
+                return True
+            self.logger.warning(f"Reconnect failed, retrying in {delay}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 30)   # Cap at 30s
+        return False
     
     def read_frame(self) -> Optional[cv2.Mat]:
         """
@@ -111,6 +140,7 @@ class VideoCaptureClient:
             size_bytes = self.client_socket.recv(4)
             if len(size_bytes) < 4:
                 self.logger.warning("Connection closed or no data")
+                self.connected = False
                 return None
             
             frame_size = struct.unpack("!I", size_bytes)[0]
@@ -121,6 +151,7 @@ class VideoCaptureClient:
                 chunk = self.client_socket.recv(frame_size - len(frame_data))
                 if not chunk:
                     self.logger.warning("Connection closed during frame receive")
+                    self.connected = False
                     return None
                 frame_data += chunk
             
@@ -144,52 +175,6 @@ class VideoCaptureClient:
             self.logger.error(f"Unexpected error: {e}")
             return None
     
-    def stream(self):
-        """Main receive loop."""
-        if not self.client_socket:
-            self.logger.error("Not connected to server")
-            return
-        
-        self.is_running = True
-        self.frame_count = 0
-        
-        try:
-            while self.is_running:
-                # Read one frame
-                frame = self.read_frame()
-                
-                if frame is None:
-                    self.logger.warning("Failed to receive frame")
-                    continue
-                ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if not ret:
-                    self.logger.error("Decode failed")
-                    continue
-                jpeg_bytes = jpeg.tobytes()
-                
-                # ============ ADD TO QUEUE WITH MUTEX ============
-                with self.frame_lock:
-                    # Limit queue size to prevent memory issues
-                    if len(self.frames) < 10:
-                        self.frames.append(jpeg_bytes)
-                    else:
-                        # Queue full, remove oldest frame
-                        self.frames.pop(0)
-                        self.frames.append(jpeg_bytes)
-                    
-                    # Signal that a frame is available
-                    self.frame_available.set()
-                # =================================================
-                
-                self.frame_count += 1
-                
-                # Print stats every 30 frames
-                if self.frame_count % 30 == 0:
-                    self.logger.info(f"Received {self.frame_count} frames")
-        except Exception as e:
-            self.logger.error(f"Stream error: {e}")
-        finally:
-            self.close()
     
     def send_feedback(self, message: str):
         """
@@ -203,7 +188,61 @@ class VideoCaptureClient:
                 self.client_socket.send(message.encode())
             except:
                 pass
-    
+            
+    def stream(self):
+        """Main receive loop – handles connection and reconnection."""
+        self.logger.info("Receiver thread started")
+
+        # Initial connection (with retries)
+        while self.is_running and not self._connect():
+            time.sleep(1)
+
+        if not self.is_running:
+            return
+
+        self.logger.info("Starting video stream")
+
+        while self.is_running:
+            # Ensure we have a connection
+            if not self.client_socket or not self.connected:
+                self.logger.warning("Connection lost, trying to reconnect")
+                if not self._reconnect():
+                    time.sleep(1)
+                    continue
+
+            frame = self.read_frame()
+            if frame is None:
+                # Connection likely lost – mark as disconnected and retry
+                if self.client_socket:
+                    try:
+                        self.client_socket.close()
+                    except:
+                        pass
+                    self.client_socket = None
+                    self.connected = False
+                continue
+
+            # Encode frame and add to queue
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ret:
+                self.logger.error("Encode failed")
+                continue
+
+            jpeg_bytes = jpeg.tobytes()
+            with self.frame_lock:
+                if len(self.frames) < 10:
+                    self.frames.append(jpeg_bytes)
+                else:
+                    self.frames.pop(0)
+                    self.frames.append(jpeg_bytes)
+                self.frame_available.set()
+
+            self.frame_count += 1
+            if self.frame_count % 30 == 0:
+                self.logger.info(f"Received {self.frame_count} frames")
+
+        self.logger.info("Receiver thread stopped")
+
     def close(self):
         """Clean up resources."""
         self.is_running = False
@@ -251,9 +290,9 @@ def main():
     try:
         # Create client and connect to server
         with VideoCaptureClient(
-            host='127.0.0.1',  #
-            port=9999,
-            web_port=6666,
+            host=SERVER_IP,  #
+            port=SERVER_PORT,
+            web_port=CLIENT_PORT,
             enable_logging=True
         ) as client:
             client.start_web()
