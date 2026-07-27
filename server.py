@@ -10,10 +10,13 @@ from network_impairment import NetworkImpairment
 from data_collection import DataCollection
 from dotenv import load_dotenv
 import os
+import joblib
 
 load_dotenv() 
 SERVER_IP= os.getenv("SERVER_IP") 
 SERVER_PORT= os.getenv("SERVER_PORT") 
+
+MODEL_PATH = "data/quality_predictor.pkl"
 
 class VideoCaptureServer:
     def __init__(
@@ -25,10 +28,18 @@ class VideoCaptureServer:
         scale: float = 1.0,
         fps: int = 30,
         max_connections: int = 1,
+<<<<<<< Updated upstream
+        use_ml: bool = False,
         repeat: bool = True,
         enable_logging: bool = True,
         enable_impairment: bool = True,
         enable_collection: bool = True,
+=======
+        repeat: bool = False,
+        enable_logging: bool = False,
+        enable_impairment: bool = False,
+        enable_collection: bool = False,
+>>>>>>> Stashed changes
         output_file : str = None,
     ):
         """
@@ -76,7 +87,18 @@ class VideoCaptureServer:
         self.logger.debug("DEBUG: Server logger initialized")
         self.client_socket = None
         self.client_address = None
-
+        self.adaptation_interval = 30
+        #
+        self.use_ml = use_ml
+        self.model = None
+        
+        if self.use_ml:
+            try:
+                self.model = joblib.load(MODEL_PATH)
+                self.logger.info("ML model loaded successfully")
+            except Exception as e:
+                self.logger.warning(f"Failed to load model: {e}")
+                self.use_ml = False
         # Initialize components
         try:
             self.video_capture = self._init_video(camera_index)
@@ -95,6 +117,7 @@ class VideoCaptureServer:
         except Exception as e:
             self.logger.error(f"Initialization failed: {e}")
             raise
+        
     
     def _init_video(self, camera_index: int) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(camera_index)
@@ -384,7 +407,16 @@ class VideoCaptureServer:
                     cv2.imshow('Server Video Preview', frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
-                
+                # === ML ADAPTATION ===
+                if self.frame_count % self.adaptation_interval == 0:
+                    new_quality, new_scale, new_fps = self._predict_params()
+                    self.logger.info(f"ML adapted: quality={new_quality}, scale={new_scale}, fps={new_fps}")
+                    if new_quality != self.quality:
+                        self.update_quality(new_quality)
+                    if new_scale != self.scale:
+                        self.update_scale(new_scale)
+                    if new_fps != self.fps:
+                        self.update_fps(new_fps)
                 # Frame rate control
                 time.sleep(1.0 / self.fps)
                 
@@ -446,6 +478,41 @@ class VideoCaptureServer:
     def get_stats(self):
         return self.network_impairment.get_stats()
 
+    def _predict_params(self) -> Tuple[int, float, int]:
+        """
+        Predict optimal quality based on current network conditions.
+        Returns: quality value (1-100)
+        """
+        if not self.use_ml or self.model is None:
+            return self.quality, self.scale, self.fps  # fallback to current quality
+        
+        # Get current network stats from the impairment object
+        if self.network_impairment:
+            loss = self.network_impairment.loss_rate
+            delay = self.network_impairment.delay_ms
+            jitter = self.network_impairment.jitter_ms
+        else:
+            # If no impairment, assume perfect network
+            loss = 0.0
+            delay = 0.0
+            jitter = 0.0
+        
+        features = [[loss, delay, jitter]]
+        
+        try:
+            pred = self.model.predict(features)[0]  # [quality, scale, fps]
+            quality = max(10, min(100, int(round(pred[0]))))
+            # Round scale to nearest valid value
+            valid_scales = [0.25, 0.5, 0.75, 1.0]
+            scale = min(valid_scales, key=lambda x: abs(x - pred[1]))
+            # Round fps to nearest valid value
+            valid_fps = [10, 15, 20, 30]
+            fps = min(valid_fps, key=lambda x: abs(x - pred[2]))
+            
+            return quality, scale, fps
+        except Exception as e:
+            self.logger.error(f"Prediction failed: {e}")
+            return self.quality, self.scale, self.fps  # fallback
 
 def main():
     # Create and start server
@@ -456,6 +523,10 @@ def main():
         quality=80,
         scale=0.5,
         fps=30,
+        repeat= False,
+        enable_logging= False,
+        enable_impairment= False,
+        enable_collection= False,
         enable_logging=True
     ) as server:
         
