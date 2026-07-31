@@ -1,17 +1,17 @@
 # ML Adaptive Video Streaming
 
-A real‑time adaptive video streaming system that uses machine learning to dynamically adjust video quality (bitrate, resolution, and frame rate) based on network conditions. Built with Python, OpenCV, and Flask, this system simulates network impairments and adapts the stream to maintain optimal Quality of Experience (QoE).
+A real‑time adaptive video streaming system that uses machine learning to dynamically adjust video quality based on network conditions. Built with Python, OpenCV, and Flask, this system simulates network impairments and adapts the stream to maintain optimal Quality of Experience (QoE).
 ## Features
 
 - Python network impairment simulation
 
-- ML‑based adaptation – A RandomForest/ExtraTrees model predicts optimal (quality, scale, fps) based on current network conditions. Based on the paper 
+- ML‑based adaptation – A RandomForest/ExtraTrees model predicts optimal (quality, scale, fps) based on current network conditions.
 
-- Web dashboard – Flask‑based web UI displays the live video stream with real‑time stats (frames, FPS, quality).
+- Web dashboard – Flask‑based web UI displays the live video stream.
 
 - Automatic reconnection – Client automatically reconnects if the server restarts or network drops.
 
-![Architecture graph](data/arch-graph "Architecture graph")
+![](demo/adaptive-video-streaming.jpg)
 
 ## System Requirements
 
@@ -95,7 +95,7 @@ This project is based on the paper:
 > Benchmarking Learning‑based Bitrate Ladder Prediction Methods for Adaptive Video Streaming
 Ahmed Telili, Wassim Hamidouche, Sid Ahmed Fezza, and Luce Morin (2022)
 
-The ML component uses ExtraTrees Regressor (ranked #1) and RandomForest Regressor (ranked #2) from the benchmark.
+The ML component RandomForest Regressor (ranked #2) from the benchmark.
 
 ## Train the ML Model
 ```
